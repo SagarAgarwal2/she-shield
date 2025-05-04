@@ -9,9 +9,7 @@ import geocoder  # For real-time location access
 from datetime import datetime
 import threading
 import time
-import geocoder
 from geopy.distance import geodesic
-import mysql.connector
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -21,27 +19,154 @@ import os
 
 # Email configuration
 EMAIL_ADDRESS = 'unclepincle@gmail.com'  # Your Gmail address
-EMAIL_PASSWORD = 'lder hlfg cnni fznd'  # Your Gmail App Password (not your regular password)
+EMAIL_PASSWORD = 'hssd hqqp lzkh sawa'  # Your Gmail App Password (not your regular password)
 RECIPIENT_EMAIL = 'tnbtsper30@gmail.com'  # Email address to receive emergency alerts
 SMTP_SERVER = 'smtp.gmail.com'
 SMTP_PORT = 587
 
-# Global flag to stop capturing
+# Theme configuration
+BG_COLOR = "#f0f0f0"
+PRIMARY_COLOR = "#FF1493"  # Deep Pink
+SECONDARY_COLOR = "#FF69B4"  # Hot Pink
+TEXT_COLOR = "#333333"
+
+# Global variables for camera
+camera = None
+capture_thread = None
 stop_capture = False
 
-# Database connection
+# Database configuration
+DB_CONFIG = {
+    'host': 'localhost',
+    'user': 'root',
+    'password': 'sagar13',
+    'database': 'she'
+}
+
+# Database connection with error handling and reconnection
 def connect_db():
     try:
-        conn = mysql.connector.connect(
-            host='localhost',
-            user='root',
-            password='sagar13',
-            database='sheshield_db'
-        )
+        conn = mysql.connector.connect(**DB_CONFIG)
         return conn
     except mysql.connector.Error as err:
         messagebox.showerror("Database Error", f"Error connecting to the database: {err}")
         return None
+
+# Function to execute database queries safely
+def execute_query(query, params=None, fetch=True):
+    conn = connect_db()
+    if not conn:
+        return None
+    
+    try:
+        cursor = conn.cursor()
+        cursor.execute(query, params or ())
+        
+        if fetch:
+            result = cursor.fetchall()
+        else:
+            conn.commit()
+            result = cursor.rowcount
+        
+        cursor.close()
+        return result
+    except mysql.connector.Error as err:
+        messagebox.showerror("Database Error", f"Error executing query: {err}")
+        return None
+    finally:
+        if conn:
+            conn.close()
+
+# Function to create necessary tables if they don't exist
+def create_tables():
+    queries = [
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            name VARCHAR(255) NOT NULL,
+            dob DATE NOT NULL,
+            mobile VARCHAR(15) NOT NULL,
+            aadhar VARCHAR(12) NOT NULL UNIQUE,
+            username VARCHAR(50) UNIQUE,
+            password VARCHAR(255),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS emergency_contacts (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            aadhar VARCHAR(12) NOT NULL,
+            contact1 VARCHAR(15),
+            contact2 VARCHAR(15),
+            contact3 VARCHAR(15),
+            contact4 VARCHAR(15),
+            contact5 VARCHAR(15),
+            FOREIGN KEY (aadhar) REFERENCES users(aadhar)
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS red_zones (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            latitude DECIMAL(10, 8) NOT NULL,
+            longitude DECIMAL(11, 8) NOT NULL,
+            description TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS safe_zones (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            latitude DECIMAL(10, 8) NOT NULL,
+            longitude DECIMAL(11, 8) NOT NULL,
+            description TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    ]
+    
+    for query in queries:
+        execute_query(query, fetch=False)
+
+# Function to check if a user exists
+def user_exists(aadhar):
+    query = "SELECT COUNT(*) FROM users WHERE aadhar = %s"
+    result = execute_query(query, (aadhar,))
+    return result[0][0] > 0 if result else False
+
+# Function to get user details
+def get_user_details(aadhar):
+    query = "SELECT * FROM users WHERE aadhar = %s"
+    result = execute_query(query, (aadhar,))
+    return result[0] if result else None
+
+# Function to get emergency contacts
+def get_emergency_contacts(aadhar):
+    query = "SELECT contact1, contact2, contact3, contact4, contact5 FROM emergency_contacts WHERE aadhar = %s"
+    result = execute_query(query, (aadhar,))
+    return result[0] if result else None
+
+# Function to add a new red zone
+def add_red_zone(latitude, longitude, description=None):
+    query = "INSERT INTO red_zones (latitude, longitude, description) VALUES (%s, %s, %s)"
+    return execute_query(query, (latitude, longitude, description), fetch=False)
+
+# Function to add a new safe zone
+def add_safe_zone(latitude, longitude, description=None):
+    query = "INSERT INTO safe_zones (latitude, longitude, description) VALUES (%s, %s, %s)"
+    return execute_query(query, (latitude, longitude, description), fetch=False)
+
+# Function to get all red zones
+def get_red_zones():
+    query = "SELECT latitude, longitude, description FROM red_zones"
+    return execute_query(query)
+
+# Function to get all safe zones
+def get_safe_zones():
+    query = "SELECT latitude, longitude, description FROM safe_zones"
+    return execute_query(query)
+
+# Initialize database tables when the application starts
+create_tables()
 
 # Function to validate Aadhar number
 def validate_aadhar(aadhar_number):
@@ -49,10 +174,8 @@ def validate_aadhar(aadhar_number):
         return False
     return True
 
-
 # Define a global variable to store the Aadhar number
 aadhar_number_global = ""
-
 
 # Function to request microphone access
 def microphone_access():
@@ -77,7 +200,7 @@ def send_email(image_path):
         msg = MIMEMultipart()
         msg['From'] = EMAIL_ADDRESS
         msg['To'] = RECIPIENT_EMAIL
-        msg['Subject'] = 'Emergency Alert - Captured Image'
+        msg['Subject'] = 'EMERGENCY ALERT - SheShield Safety App'
         
         # Get detailed location and time
         location = get_location()
@@ -106,19 +229,29 @@ This is an automated message from SheShield - Women Safety App."""
             print(f"Failed to attach image: {str(e)}")
             return
         
-        # Send the email
-        try:
-            with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
-                server.starttls()
-                server.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
-                server.sendmail(EMAIL_ADDRESS, RECIPIENT_EMAIL, msg.as_string())
-            print(f"Email sent successfully with attachment: {image_path}")
-        except smtplib.SMTPAuthenticationError:
-            print("Email authentication failed. Please check your email settings and App Password.")
-            return
-        except Exception as e:
-            print(f"Failed to send email: {str(e)}")
-            return
+        # Send the email with retry mechanism
+        max_retries = 3
+        retry_count = 0
+        
+        while retry_count < max_retries:
+            try:
+                with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+                    server.starttls()
+                    server.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
+                    server.sendmail(EMAIL_ADDRESS, RECIPIENT_EMAIL, msg.as_string())
+                print(f"Email sent successfully with attachment: {image_path}")
+                break
+            except smtplib.SMTPAuthenticationError:
+                print("Email authentication failed. Please check your email settings and App Password.")
+                return
+            except Exception as e:
+                retry_count += 1
+                print(f"Attempt {retry_count} failed to send email: {str(e)}")
+                if retry_count < max_retries:
+                    time.sleep(2)  # Wait before retrying
+                else:
+                    print("Failed to send email after multiple attempts.")
+                    return
         
         # Clean up the image file after sending
         try:
@@ -130,20 +263,50 @@ This is an automated message from SheShield - Women Safety App."""
     except Exception as e:
         print(f"Error in email sending process: {str(e)}")
 
-# Continuous image capture function
+def initialize_camera():
+    global camera
+    if camera is None:
+        # Try different camera backends
+        for backend in [cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY]:
+            camera = cv2.VideoCapture(0, backend)
+            if camera.isOpened():
+                print(f"Camera initialized with backend: {backend}")
+                break
+            else:
+                camera.release()
+                camera = None
+        
+        if camera is None:
+            messagebox.showerror("Error", "Could not open webcam. Please check if it's connected and not in use by another application.")
+            return False
+            
+        # Set camera properties
+        try:
+            camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            camera.set(cv2.CAP_PROP_FPS, 15)
+            camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Reduce buffer size
+        except Exception as e:
+            print(f"Warning: Could not set some camera properties: {e}")
+            
+    return True
+
+def release_camera():
+    global camera
+    if camera is not None:
+        camera.release()
+        camera = None
+
 def capture_images_continuously():
-    global stop_capture
-    cam = cv2.VideoCapture(0)
-    if not cam.isOpened():
-        messagebox.showerror("Error", "Could not open webcam.")
+    global stop_capture, camera
+    
+    if not initialize_camera():
         return
 
     # Create a window with a cancel button
     capture_window = tk.Toplevel(root)
     capture_window.title("Emergency Image Capture")
     capture_window.geometry("400x200")
-    
-    # Make the window stay on top
     capture_window.attributes('-topmost', True)
     
     # Add status label
@@ -156,19 +319,28 @@ def capture_images_continuously():
                             font=("Arial", 12), bg="red", fg="white")
     cancel_button.pack(pady=10)
 
-    cv2.namedWindow("Continuous Capture")
+    retry_count = 0
+    max_retries = 3
 
     try:
-        while True:
-            if getattr(capture_images_continuously, 'stop_capture', False):
-                print("Capture stopped by user.")
-                break
-
-            ret, frame = cam.read()
+        while not stop_capture:
+            ret, frame = camera.read()
+            
             if not ret:
-                print("Failed to grab frame.")
-                break
-
+                retry_count += 1
+                if retry_count >= max_retries:
+                    print("Failed to grab frame after multiple attempts. Reinitializing camera...")
+                    release_camera()
+                    if not initialize_camera():
+                        break
+                    retry_count = 0
+                continue
+            
+            retry_count = 0  # Reset retry count on successful capture
+            
+            # Resize frame for better performance
+            frame = cv2.resize(frame, (640, 480))
+            
             # Display the current frame
             cv2.imshow("Continuous Capture", frame)
 
@@ -180,14 +352,11 @@ def capture_images_continuously():
             # Update status
             status_label.config(text=f"Last image captured: {datetime.now().strftime('%H:%M:%S')}")
 
-            # Send the image via email
-            try:
-                send_email(img_name)
-            except Exception as e:
-                print(f"Failed to send email: {str(e)}")
+            # Send the image via email in a separate thread
+            threading.Thread(target=send_email, args=(img_name,), daemon=True).start()
 
-            # Wait for 1 second before capturing the next frame
-            time.sleep(1)
+            # Wait for 2 seconds before capturing the next frame
+            time.sleep(2)
 
             # Check for ESC key to stop the capture
             if cv2.waitKey(1) & 0xFF == 27:  # ESC key
@@ -199,10 +368,24 @@ def capture_images_continuously():
         messagebox.showerror("Error", f"Image capture error: {str(e)}")
 
     finally:
-        cam.release()
         cv2.destroyAllWindows()
         if 'capture_window' in locals():
             capture_window.destroy()
+        stop_capture = False
+        release_camera()
+
+def start_continuous_capture():
+    global capture_thread, stop_capture
+    stop_capture = False
+    
+    # Start capture in a separate thread
+    capture_thread = threading.Thread(target=capture_images_continuously, daemon=True)
+    capture_thread.start()
+
+def stop_continuous_capture():
+    global stop_capture
+    stop_capture = True
+    release_camera()
 
 # Function to start continuous image capture in a separate thread
 def start_continuous_capture():
@@ -280,8 +463,8 @@ Accuracy: {'Network-based' if 'network' in location_data else 'IP-based'}"""
 # Function to send emergency SMS using Twilio
 def send_emergency_sms(emergency_contacts):
     try:
-        account_sid = 'AC16599e003f10804715efdefa20334ca2'
-        auth_token = '53a8737b02d5975f4fa124127f3b52e7'
+        account_sid = 'AC2613cbf478b1ad0f0ccd2fc7f5c64e25'
+        auth_token = '44d89292c4978806ae71a6d8155a3994'
         client = Client(account_sid, auth_token)
 
         # Get detailed location
@@ -298,7 +481,7 @@ This is an automated emergency alert. Please respond immediately."""
             try:
                 message = client.messages.create(
                     body=message_body,
-                    from_='+15165180831',
+                    from_='+1 947 813 5630',
                     to=contact
                 )
                 print(f"SOS sent to {contact}")
@@ -365,7 +548,7 @@ def fetch_red_zones_from_db():
         connection = mysql.connector.connect(
             host='localhost',
             user='root',  # Replace with your MySQL username
-            password='SOMYA@2004',  # Replace with your MySQL password
+            password='sagar13',  # Replace with your MySQL password
             database='sheshield_db'  # Replace with your database name
         )
         
@@ -424,11 +607,6 @@ if user_location:
 else:
     print("Could not determine current location.")
 
-
-
-
-
-
 def create_account():
     def save_account():
         global aadhar_number_global
@@ -437,58 +615,103 @@ def create_account():
         mobile = entry_mobile.get()
         aadhar = entry_aadhar.get()
 
-        # Aadhar validation
-        if not validate_aadhar(aadhar):
-            messagebox.showerror("Input Error", "Aadhar card number must be exactly 12 digits.")
+        # Validate inputs
+        if not all([name, dob, mobile, aadhar]):
+            messagebox.showerror("Input Error", "Please fill in all fields")
             return
 
-        # Save the Aadhar number to the global variable
-        aadhar_number_global = aadhar
-        
+        # Aadhar validation
+        if not validate_aadhar(aadhar):
+            messagebox.showerror("Input Error", "Aadhar card number must be exactly 12 digits")
+            return
+
+        # Check if user already exists
+        if user_exists(aadhar):
+            messagebox.showerror("Error", "User with this Aadhar number already exists")
+            return
+
         # Save user data into the database
-        conn = connect_db()
-        if conn:
-            cursor = conn.cursor()
-            try:
-                cursor.execute("INSERT INTO users (name, dob, mobile, aadhar) VALUES (%s, %s, %s, %s)",
-                           (name, dob, mobile, aadhar))
-                conn.commit()
+        try:
+            query = """
+                INSERT INTO users (name, dob, mobile, aadhar) 
+                VALUES (%s, %s, %s, %s)
+            """
+            result = execute_query(query, (name, dob, mobile, aadhar), fetch=False)
+            
+            if result:
+                # Save the Aadhar number to the global variable
+                aadhar_number_global = aadhar
                 messagebox.showinfo("Success", "Account created successfully!")
                 account_window.destroy()  # Close the account window
                 create_credentials()  # Open credentials window
-            except mysql.connector.Error as err:
-                messagebox.showerror("Error", f"Error creating account: {err}")
-            finally:
-                cursor.close()
-                conn.close()
+            else:
+                messagebox.showerror("Error", "Failed to create account")
+        except Exception as e:
+            messagebox.showerror("Error", f"An error occurred: {str(e)}")
     
     # Creating account page
     account_window = tk.Toplevel(root)
     account_window.title("Create Your Account")
     account_window.geometry("400x400")
+    account_window.configure(bg=BG_COLOR)
     
-    tk.Label(account_window, text="Name", font=("Arial", 14)).pack(pady=10)
-    entry_name = tk.Entry(account_window, font=("Arial", 12))
-    entry_name.pack()
+    # Title
+    tk.Label(account_window, 
+             text="Create Account", 
+             font=("Arial", 20, "bold"),
+             fg=PRIMARY_COLOR,
+             bg=BG_COLOR).pack(pady=20)
     
-    tk.Label(account_window, text="Date of Birth (YYYY-MM-DD)", font=("Arial", 14)).pack(pady=10)
-    entry_dob = tk.Entry(account_window, font=("Arial", 12))
-    entry_dob.pack()
-    tk.Label(account_window, text="Format: YYYY-MM-DD", font=("Arial", 10), fg="red").pack(pady=5)
+    # Name field
+    tk.Label(account_window, 
+             text="Full Name", 
+             font=("Arial", 12),
+             bg=BG_COLOR).pack(pady=(10, 0))
+    entry_name = create_styled_entry(account_window)
+    entry_name.pack(pady=(0, 10))
+    
+    # Date of Birth field
+    tk.Label(account_window, 
+             text="Date of Birth (YYYY-MM-DD)", 
+             font=("Arial", 12),
+             bg=BG_COLOR).pack(pady=(10, 0))
+    entry_dob = create_styled_entry(account_window)
+    entry_dob.pack(pady=(0, 10))
+    tk.Label(account_window, 
+             text="Format: YYYY-MM-DD", 
+             font=("Arial", 10), 
+             fg="red",
+             bg=BG_COLOR).pack(pady=(0, 10))
 
-    tk.Label(account_window, text="Mobile Number", font=("Arial", 14)).pack(pady=10)
-    entry_mobile = tk.Entry(account_window, font=("Arial", 12))
-    entry_mobile.pack()
+    # Mobile Number field
+    tk.Label(account_window, 
+             text="Mobile Number", 
+             font=("Arial", 12),
+             bg=BG_COLOR).pack(pady=(10, 0))
+    entry_mobile = create_styled_entry(account_window)
+    entry_mobile.pack(pady=(0, 10))
 
-    tk.Label(account_window, text="Aadhar Card Number", font=("Arial", 14)).pack(pady=10)
-    entry_aadhar = tk.Entry(account_window, font=("Arial", 12))
-    entry_aadhar.pack()
+    # Aadhar Card Number field
+    tk.Label(account_window, 
+             text="Aadhar Card Number", 
+             font=("Arial", 12),
+             bg=BG_COLOR).pack(pady=(10, 0))
+    entry_aadhar = create_styled_entry(account_window)
+    entry_aadhar.pack(pady=(0, 10))
 
-    tk.Button(account_window, text="Submit", command=save_account, font=("Arial", 14), bg="green", fg="white").pack(pady=20)
+    # Submit button
+    submit_btn = create_styled_button(account_window, 
+                                    "Submit", 
+                                    save_account)
+    submit_btn.pack(pady=20)
 
-
-
-
+    # Center the window
+    account_window.update_idletasks()
+    width = account_window.winfo_width()
+    height = account_window.winfo_height()
+    x = (account_window.winfo_screenwidth() // 2) - (width // 2)
+    y = (account_window.winfo_screenheight() // 2) - (height // 2)
+    account_window.geometry(f'{width}x{height}+{x}+{y}')
 
 # Function to create username and password
 def create_credentials():
@@ -532,10 +755,6 @@ def create_credentials():
     entry_password.pack()
 
     tk.Button(credentials_window, text="Save Credentials", command=save_credentials, font=("Arial", 14), bg="blue", fg="white").pack(pady=20)
-
-
-
-
 
 # Function for login
 def login():
@@ -809,6 +1028,39 @@ def add_emergency_contacts():
     tk.Button(contacts_window, text="Save Contacts", command=save_contacts, 
               font=("Arial", 14), bg="green", fg="white").pack(pady=20)
 
+PRIMARY_COLOR = "#FF1493"  # Deep Pink
+SECONDARY_COLOR = "#FF69B4"  # Hot Pink
+TEXT_COLOR = "#333333"
+
+root.configure(bg=BG_COLOR)
+
+def create_styled_button(parent, text, command):
+    return tk.Button(
+        parent,
+        text=text,
+        command=command,
+        font=("Helvetica", 12),
+        bg=PRIMARY_COLOR,
+        fg="white",
+        activebackground=SECONDARY_COLOR,
+        activeforeground="white",
+        relief="flat",
+        padx=20,
+        pady=10,
+        cursor="hand2"
+    )
+
+def create_styled_entry(parent, show=None):
+    return tk.Entry(
+        parent,
+        font=("Helvetica", 12),
+        bg="white",
+        fg=TEXT_COLOR,
+        relief="solid",
+        bd=1,
+        show=show
+    )
+
 def configure_email_settings():
     def save_email_settings():
         global EMAIL_ADDRESS, EMAIL_PASSWORD, RECIPIENT_EMAIL
@@ -832,34 +1084,92 @@ def configure_email_settings():
 
     email_window = tk.Toplevel(root)
     email_window.title("Configure Email Settings")
-    email_window.geometry("500x400")
+    email_window.geometry("500x600")
+    email_window.configure(bg=BG_COLOR)
 
-    tk.Label(email_window, text="Email Configuration", font=("Arial", 18, "bold"), fg="purple").pack(pady=20)
-    
+    # Header
+    header_frame = tk.Frame(email_window, bg=PRIMARY_COLOR)
+    header_frame.pack(fill=tk.X, pady=(0, 20))
+
+    tk.Label(
+        header_frame,
+        text="Email Configuration",
+        font=("Helvetica", 24, "bold"),
+        fg="white",
+        bg=PRIMARY_COLOR
+    ).pack(pady=20)
+
+    # Content Frame
+    content_frame = tk.Frame(email_window, bg=BG_COLOR)
+    content_frame.pack(padx=40, pady=20, fill=tk.BOTH, expand=True)
+
+    # Gmail Address
+    tk.Label(
+        content_frame,
+        text="Gmail Address:",
+        font=("Helvetica", 12, "bold"),
+        bg=BG_COLOR,
+        fg=TEXT_COLOR
+    ).pack(anchor="w")
+    entry_email = create_styled_entry(content_frame)
+    entry_email.pack(fill=tk.X, pady=(5, 15))
+
+    # App Password
+    tk.Label(
+        content_frame,
+        text="App Password:",
+        font=("Helvetica", 12, "bold"),
+        bg=BG_COLOR,
+        fg=TEXT_COLOR
+    ).pack(anchor="w")
+    entry_password = create_styled_entry(content_frame, show="*")
+    entry_password.pack(fill=tk.X, pady=(5, 15))
+
+    # Recipient Email
+    tk.Label(
+        content_frame,
+        text="Recipient Email:",
+        font=("Helvetica", 12, "bold"),
+        bg=BG_COLOR,
+        fg=TEXT_COLOR
+    ).pack(anchor="w")
+    entry_recipient = create_styled_entry(content_frame)
+    entry_recipient.pack(fill=tk.X, pady=(5, 15))
+
     # Instructions
-    instructions = """To use Gmail:
+    instruction_text = """To use Gmail, you need to:
 1. Enable 2-Step Verification in your Google Account
 2. Generate an App Password:
-   - Go to Google Account > Security
-   - Under '2-Step Verification', click 'App passwords'
-   - Select 'Mail' and your device
-   - Use the generated 16-character password below"""
-    
-    tk.Label(email_window, text=instructions, font=("Arial", 10), justify=tk.LEFT, wraplength=450).pack(pady=10)
+   • Go to Google Account → Security
+   • Find '2-Step Verification'
+   • Click 'App passwords'
+   • Select 'Mail' and your device
+   • Use the generated password"""
 
-    tk.Label(email_window, text="Your Gmail Address", font=("Arial", 12)).pack(pady=5)
-    entry_email = tk.Entry(email_window, font=("Arial", 12))
-    entry_email.pack()
+    tk.Label(
+        content_frame,
+        text=instruction_text,
+        font=("Helvetica", 10),
+        bg=BG_COLOR,
+        fg=TEXT_COLOR,
+        justify=tk.LEFT,
+        wraplength=400
+    ).pack(pady=20)
 
-    tk.Label(email_window, text="Gmail App Password", font=("Arial", 12)).pack(pady=5)
-    entry_password = tk.Entry(email_window, show="*", font=("Arial", 12))
-    entry_password.pack()
+    # Save Button
+    save_btn = create_styled_button(content_frame, "Save Settings", save_email_settings)
+    save_btn.pack(pady=20)
 
-    tk.Label(email_window, text="Recipient Email", font=("Arial", 12)).pack(pady=5)
-    entry_recipient = tk.Entry(email_window, font=("Arial", 12))
-    entry_recipient.pack()
+# Configure Email Button
+configure_btn = create_styled_button(root, "Configure Email Settings", configure_email_settings)
+configure_btn.pack(expand=True)
 
-    tk.Button(email_window, text="Save Settings", command=save_email_settings, 
-              font=("Arial", 14), bg="green", fg="white").pack(pady=20)
+# Center the window
+root.update_idletasks()
+width = root.winfo_width()
+height = root.winfo_height()
+x = (root.winfo_screenwidth() // 2) - (width // 2)
+y = (root.winfo_screenheight() // 2) - (height // 2)
+root.geometry(f'{width}x{height}+{x}+{y}')
 
 root.mainloop()
